@@ -2,130 +2,146 @@ import streamlit as st
 import requests
 import time
 
-st.set_page_config(page_title="AI Podcast Generator", page_icon="🎙️", layout="centered")
+st.set_page_config(page_title="AI Podcast Generator", page_icon="🎙️")
 
 st.title("🎙️ One-Click AI Podcast Generator")
-st.write("Create a short AI podcast conversation instantly using KIE AI")
 
-# -----------------------------
+# -------------------
 # Sidebar
-# -----------------------------
-st.sidebar.header("🔑 API Settings")
+# -------------------
 
-API_KEY = st.sidebar.text_input(
-    "KIE AI API Key",
-    type="password",
+st.sidebar.header("API Settings")
+
+api_key = st.sidebar.text_input(
+    "KIE API Key",
+    type="password"
 )
 
-host1 = st.sidebar.selectbox(
-    "Host 1 Voice",
-    ["Adam", "James", "Brian", "Chris"]
+voice_host = st.sidebar.selectbox(
+    "Host Voice",
+    {
+        "Adam": "TX3LPaxmHKxFdv7VOQHJ"
+    }
 )
 
-host2 = st.sidebar.selectbox(
-    "Host 2 Voice",
-    ["Jessica", "Amy", "Laura", "Charlotte"]
+voice_guest = st.sidebar.selectbox(
+    "Guest Voice",
+    {
+        "Jessica": "cgSgspJ2msm6clMCkdW9"
+    }
 )
 
-# -----------------------------
-# Main UI
-# -----------------------------
+# -------------------
+# Input
+# -------------------
+
 topic = st.text_area(
     "Podcast Topic",
-    placeholder="Example: The future of AI and how it will impact jobs",
+    placeholder="Example: The future of artificial intelligence"
 )
 
-generate = st.button("🎧 Generate Podcast")
+generate = st.button("Generate Podcast")
 
-# -----------------------------
-# Generate Podcast
-# -----------------------------
+# -------------------
+# Generate
+# -------------------
+
 if generate:
 
-    if not API_KEY:
-        st.error("Please enter your API key in the sidebar")
+    if not api_key:
+        st.error("Enter API key")
         st.stop()
 
     if not topic:
-        st.error("Please enter a podcast topic")
+        st.error("Enter a topic")
         st.stop()
 
     headers = {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
 
     dialogue = [
-        {"text": f"Welcome everyone to today's podcast. Today we're discussing {topic}.", "voice": host1},
-        {"text": f"I'm excited about this topic. {topic} is changing the world rapidly.", "voice": host2},
-        {"text": "Let's start with the big question. Why does this matter right now?", "voice": host1},
-        {"text": f"Great question. {topic} is affecting businesses, technology, and everyday life.", "voice": host2},
-        {"text": "Can you give some real world examples?", "voice": host1},
-        {"text": f"Sure. We're already seeing major industries adopt solutions related to {topic}.", "voice": host2},
-        {"text": "That's fascinating. It sounds like we're just getting started.", "voice": host1},
-        {"text": "Absolutely. The next few years will be incredibly interesting.", "voice": host2}
+        {
+            "text": f"[excitedly] Welcome to today's podcast. Our topic is {topic}.",
+            "voice": voice_host
+        },
+        {
+            "text": f"[curious] That's a fascinating topic! {topic} is changing so many industries.",
+            "voice": voice_guest
+        },
+        {
+            "text": "Why do you think it's becoming so important right now?",
+            "voice": voice_host
+        },
+        {
+            "text": f"I think it's because {topic} is accelerating innovation everywhere.",
+            "voice": voice_guest
+        },
+        {
+            "text": "What should people expect in the future?",
+            "voice": voice_host
+        },
+        {
+            "text": "Honestly, we're just at the beginning of a huge transformation.",
+            "voice": voice_guest
+        }
     ]
 
     payload = {
         "model": "elevenlabs/text-to-dialogue-v3",
         "input": {
-            "dialogue": dialogue,
-            "stability": 0.5
+            "stability": 0.5,
+            "language_code": "auto",
+            "dialogue": dialogue
         }
     }
 
-    with st.spinner("🚀 Creating podcast task..."):
+    with st.spinner("Creating audio task..."):
 
-        response = requests.post(
+        r = requests.post(
             "https://api.kie.ai/api/v1/jobs/createTask",
             headers=headers,
             json=payload
         )
 
-        data = response.json()
+        res = r.json()
 
-        if data.get("code") != 200:
-            st.error(data)
+        if res["code"] != 200:
+            st.error(res)
             st.stop()
 
-        task_id = data["data"]["taskId"]
+        task_id = res["data"]["taskId"]
 
     st.success(f"Task Created: {task_id}")
 
     status_url = f"https://api.kie.ai/api/v1/jobs/getTask?taskId={task_id}"
 
-    progress = st.progress(0)
-
-    with st.spinner("🎙 Generating podcast audio..."):
+    with st.spinner("Generating podcast..."):
 
         for i in range(40):
 
             r = requests.get(status_url, headers=headers)
-            result = r.json()
+            data = r.json()
 
-            status = result["data"]["status"]
-
-            progress.progress((i+1)/40)
+            status = data["data"]["status"]
 
             if status == "success":
 
-                audio_url = result["data"]["output"]["audioUrl"]
+                audio_url = data["data"]["output"]["audioUrl"]
 
-                st.success("✅ Podcast Ready!")
+                st.success("Podcast Ready!")
 
                 st.audio(audio_url)
 
-                st.markdown(f"⬇️ [Download Podcast]({audio_url})")
+                st.markdown(f"Download Podcast: {audio_url}")
 
                 break
 
-            elif status == "failed":
+            if status == "failed":
 
                 st.error("Generation failed")
-                st.write(result)
+                st.write(data)
                 break
 
             time.sleep(3)
-
-        else:
-            st.warning("Still processing. Try again in a moment.")
