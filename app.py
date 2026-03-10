@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import time
+import json
 
 st.set_page_config(page_title="AI Podcast Studio", page_icon="🎙️", layout="centered")
 
@@ -37,16 +38,31 @@ st.markdown("""
     .script-box {
         background: #111; border: 1px solid #222; border-radius: 6px;
         padding: 1rem 1.2rem; font-family: 'Space Mono', monospace;
-        font-size: 0.78rem; line-height: 1.8; color: #aaa;
-        max-height: 280px; overflow-y: auto;
+        font-size: 0.78rem; line-height: 1.9; color: #aaa;
+        max-height: 300px; overflow-y: auto;
     }
     .script-box span.host  { color: #e8ff3f; font-weight: 700; }
     .script-box span.guest { color: #7fefff; font-weight: 700; }
+    .info-box {
+        background: #111827; border: 1px solid #1f2937; border-radius: 6px;
+        padding: 0.8rem 1rem; font-family: 'Space Mono', monospace;
+        font-size: 0.78rem; color: #6b7280; margin-bottom: 1rem;
+    }
     .divider { border: none; border-top: 1px solid #1e1e1e; margin: 1.5rem 0; }
+    .state-badge {
+        display: inline-block; padding: 2px 10px; border-radius: 20px;
+        font-family: 'Space Mono', monospace; font-size: 0.75rem; font-weight: 700;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Voice library ──────────────────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────────────
+KIE_BASE        = "https://api.kie.ai/api/v1"
+CREATE_URL      = f"{KIE_BASE}/jobs/createTask"
+POLL_URL        = f"{KIE_BASE}/jobs/recordInfo"   # ← correct endpoint
+POLL_INTERVAL   = 5    # seconds between polls
+MAX_POLLS       = 72   # 72 × 5s = 6 minutes max
+
 VOICES = {
     "Adam  (deep, authoritative)":     "TX3LPaxmHKxFdv7VOQHJ",
     "Jessica  (warm, conversational)": "cgSgspJ2msm6clMCkdW9",
@@ -55,18 +71,150 @@ VOICES = {
 }
 
 LANGUAGES = {
-    "Auto-detect": "auto",
-    "English": "en", "Spanish": "es", "French": "fr", "German": "de",
-    "Portuguese": "pt", "Italian": "it", "Japanese": "ja", "Korean": "ko",
+    "Auto-detect": "auto", "English": "en", "Spanish": "es",
+    "French": "fr", "German": "de", "Portuguese": "pt",
+    "Italian": "it", "Japanese": "ja", "Korean": "ko",
     "Mandarin Chinese": "zh", "Hindi": "hi", "Arabic": "ar",
 }
 
 FORMATS = {
-    "🎙 Interview Podcast": "interview",
-    "🗣 Debate / Discussion": "debate",
-    "📖 Storytelling Narration": "story",
-    "📰 News Briefing": "news",
+    "🎙 Interview Podcast":    "interview",
+    "🗣 Debate / Discussion":  "debate",
+    "📖 Storytelling":         "story",
+    "📰 News Briefing":        "news",
 }
+
+EPISODE_LENGTHS = {
+    "Short (~60 sec)":   6,
+    "Medium (~2 min)":  10,
+    "Long (~4 min)":    18,
+}
+
+# ── Script builder ─────────────────────────────────────────────────────────────
+def build_dialogue(topic, fmt, hv, gv, n_turns):
+    H, G = hv, gv
+    t = topic
+
+    pools = {
+        "interview": [
+            (H, f"[excitedly] Welcome back, everyone! Today we're exploring {t}. Joining me is our resident expert — great to have you!"),
+            (G, f"[warmly] Great to be here! {t} is something I genuinely get excited about… there's so much happening right now."),
+            (H, "Why should our listeners care about this right now?"),
+            (G, f"[thoughtfully] Because {t} isn't just a trend… it's fundamentally reshaping entire industries."),
+            (H, "Give me a concrete example."),
+            (G, f"[enthusiastically] Take healthcare — or finance — or education. {t} is delivering results nobody imagined five years ago."),
+            (H, "What are the biggest risks?"),
+            (G, "[sighs] Honestly? Regulation hasn't caught up — and most people still don't fully grasp what's at stake."),
+            (H, "Who's leading the charge right now?"),
+            (G, "[curiously] A mix of scrappy startups and a few legacy players who finally woke up. It's a fascinating race."),
+            (H, "Where do you see this in five years?"),
+            (G, "[awed] Completely mainstream. What feels cutting-edge today will feel obvious — maybe even quaint — by then."),
+            (H, f"Last question — advice for someone just getting started with {t}?"),
+            (G, "[laughs softly] Start small. Stay curious. Don't be afraid to be wrong — this field moves fast."),
+            (H, "[warmly] Perfect. Thank you so much for being here today!"),
+            (G, "My pleasure. Can't wait to do this again."),
+            (H, "And that's a wrap for today's show — we'll see you next time!"),
+        ],
+        "debate": [
+            (H, f"[firmly] Today we're debating {t} — I'll argue the optimistic case. Ready?"),
+            (G, f"[sarcastic] Always ready to challenge optimism! {t} has serious problems nobody's talking about."),
+            (H, "The data clearly shows progress — you can't ignore that."),
+            (G, "Progress for whom, exactly? That's — [pauses] — that's the real question."),
+            (H, "[frustrated] You're moving the goalposts. The core benefits are undeniable."),
+            (G, "[firmly] I'm not moving anything. I'm saying we need to be honest about tradeoffs."),
+            (H, "Name one tradeoff you'd actually fix."),
+            (G, "[thoughtfully] More transparency. Better accountability. Slower rollout in high-stakes areas."),
+            (H, "Slower rollout means people miss out on life-changing benefits. That's a cost too."),
+            (G, "Fair — but moving too fast and breaking things has costs no one wants to admit."),
+            (H, "[conceding] Okay… maybe we're not as far apart as I thought."),
+            (G, f"[laughs] We never are. Nuance always wins when it comes to {t}."),
+            (H, "So — common ground: move fast, but with eyes open."),
+            (G, "Exactly. Eyes wide open."),
+            (H, "A rare moment of agreement on this show — tune in next week for round two!"),
+        ],
+        "story": [
+            (H, f"[softly] Imagine a world where {t} is part of everyday life… shaping choices before we even realize it."),
+            (G, "[curiously] That world isn't as far away as it sounds, is it?"),
+            (H, "Not at all. In fact… it's already beginning."),
+            (G, "[whispering] Tell me everything."),
+            (H, f"It started with a simple question: what if {t} could solve a problem nobody had thought to tackle before?"),
+            (G, "[awed] And then what happened?"),
+            (H, "Then — [pauses dramatically] — everything changed. Not overnight. But irreversibly."),
+            (G, "Who drove that change?"),
+            (H, "A small team. Underfunded, underestimated… and absolutely relentless."),
+            (G, "[reflectively] The best stories always start that way, don't they?"),
+            (H, "Every single time. And the beautiful thing? This story isn't over."),
+            (G, "[warmly] It's barely begun."),
+            (H, "So if you're listening — wondering whether you have a role to play in this — you do."),
+            (G, "Everyone does. That's the whole point."),
+            (H, "[softly] And that… is where we leave you tonight."),
+        ],
+        "news": [
+            (H, f"[crisply] Good morning. Here are today's top stories on {t}."),
+            (G, f"[professionally] {t} continues to dominate headlines — with three major developments overnight."),
+            (H, "First: new research suggests the pace of change is accelerating faster than experts predicted."),
+            (G, "Second: industry leaders are calling for clearer guidelines — and regulators appear ready to respond."),
+            (H, f"[seriously] Third: a new report highlights both the promise and the risks of {t} — urging caution without slowing innovation."),
+            (G, "We spoke to three analysts this morning. All three used the same word: pivotal."),
+            (H, "What's driving that urgency?"),
+            (G, "Investment is up — but so is scrutiny. The honeymoon phase may be ending."),
+            (H, "Does that mean a slowdown?"),
+            (G, "[firmly] Not a slowdown. A maturation. There's a difference."),
+            (H, "Analysts say the next 90 days will be critical. We'll be watching closely."),
+            (G, "[warmly] Stay with us for live updates throughout the day. Full reports are linked below."),
+            (H, "I'm your host — thanks for starting your morning with us."),
+        ],
+    }
+
+    lines = pools[fmt][:n_turns]
+    return [{"text": text, "voice": voice_id} for voice_id, text in lines]
+
+
+# ── Polling helper ─────────────────────────────────────────────────────────────
+def poll_task(task_id, headers, bar, status_text):
+    """
+    Polls /api/v1/jobs/recordInfo until state == 'success' or 'fail'.
+    Returns (audio_url, raw_data) or raises on failure.
+    """
+    for i in range(MAX_POLLS):
+        time.sleep(POLL_INTERVAL)
+        try:
+            r    = requests.get(POLL_URL, params={"taskId": task_id},
+                                headers=headers, timeout=15)
+            data = r.json()
+        except Exception as e:
+            status_text.warning(f"Polling error (retry {i+1}): {e}")
+            continue
+
+        inner = data.get("data") or {}
+        state = inner.get("state", "unknown")          # waiting|queuing|generating|success|fail
+        elapsed = (i + 1) * POLL_INTERVAL
+
+        pct = min((i + 1) / MAX_POLLS, 0.95)
+        bar.progress(pct, text=f"⏳ State: **{state}** — {elapsed}s elapsed")
+
+        if state == "success":
+            bar.progress(1.0, text="✅ Done!")
+            # resultJson is a JSON-encoded string
+            result_raw = inner.get("resultJson", "{}")
+            try:
+                result = json.loads(result_raw) if isinstance(result_raw, str) else result_raw
+            except Exception:
+                result = {}
+            # Try common key patterns
+            audio_url = (
+                result.get("audioUrl")
+                or result.get("audio_url")
+                or result.get("url")
+                or (result.get("resultUrls") or [None])[0]
+            )
+            return audio_url, data
+
+        if state == "fail":
+            return None, data
+
+    return None, {"timeout": True}
+
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 st.sidebar.markdown("### ⚙️ Configuration")
@@ -85,8 +233,12 @@ stability = st.sidebar.slider(
     "🎚 Voice Stability", 0.0, 1.0, 0.45, 0.05,
     help="Lower = more expressive. Higher = more consistent."
 )
+
+length_label = st.sidebar.selectbox("⏱ Episode Length", list(EPISODE_LENGTHS.keys()), index=1)
+n_turns      = EPISODE_LENGTHS[length_label]
+
 st.sidebar.markdown("---")
-st.sidebar.markdown("<small style='color:#444'>Powered by KIE · ElevenLabs V3</small>",
+st.sidebar.markdown("<small style='color:#444'>Powered by KIE · ElevenLabs V3<br>Poll endpoint: /jobs/recordInfo</small>",
                     unsafe_allow_html=True)
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -102,86 +254,30 @@ topic     = st.text_area("Podcast topic", placeholder="e.g. The future of AI in 
 fmt_label = st.selectbox("Show format", list(FORMATS.keys()))
 fmt       = FORMATS[fmt_label]
 
-
-# ── Script builder ─────────────────────────────────────────────────────────────
-def build_dialogue(topic, fmt, hv, gv):
-    """
-    Returns list of {text, voice} dicts.
-    Uses audio tags, ellipses and dashes per ElevenLabs V3 best practices.
-    """
-    H, G = hv, gv
-    t = topic  # shorthand
-
-    if fmt == "interview":
-        lines = [
-            (H, f"[excitedly] Welcome back, everyone! Today we're diving deep into {t}. Joining me is our resident expert — great to have you here!"),
-            (G, f"[warmly] Great to be here! {t} is something I genuinely get excited about… there's so much happening right now."),
-            (H, "So — let's start at the top. Why should our listeners care about this right now?"),
-            (G, f"[thoughtfully] Because {t} isn't just a trend… it's fundamentally changing how we think about — well, almost everything."),
-            (H, "That's a bold claim! Give me a concrete example."),
-            (G, f"[enthusiastically] Sure! Take healthcare — or finance — or education. {t} is already delivering results that would have seemed impossible five years ago."),
-            (H, "And where do you see the biggest risks?"),
-            (G, "[sighs] Honestly? The risks are real. Regulation hasn't caught up, and most people still don't fully understand what's at stake."),
-            (H, f"Last question — what's your advice for someone just getting started with {t}?"),
-            (G, "[laughs softly] Start small. Stay curious. And don't be afraid to be wrong — because this field moves fast."),
-            (H, "[warmly] Love that. Thanks so much for being here today!"),
-        ]
-    elif fmt == "debate":
-        lines = [
-            (H, f"[firmly] Today we're debating {t} — and I'll argue the optimistic case. Ready?"),
-            (G, f"[sarcastic] Oh, I'm always ready to challenge optimism! {t} has some serious problems people aren't talking about."),
-            (H, "But the data clearly shows progress — you can't ignore that."),
-            (G, "Progress for whom, exactly? That's — [pauses] — that's the real question."),
-            (H, "[frustrated] You're moving the goalposts. The core benefits are undeniable."),
-            (G, "[firmly] I'm not moving anything. I'm saying we need to be honest about tradeoffs."),
-            (H, "Fair point. What would you actually change?"),
-            (G, "[thoughtfully] More transparency. Better accountability. And — honestly — a slower rollout in high-stakes areas."),
-            (H, "[conceding] Okay… I can get behind that. Maybe we're not as far apart as I thought."),
-            (G, f"[laughs] We never are. That's the thing about {t} — nuance always wins in the end."),
-        ]
-    elif fmt == "story":
-        lines = [
-            (H, f"[softly] Imagine a world where {t} is part of everyday life… where it shapes the choices we make before we even realize it."),
-            (G, "[curiously] That world isn't as far away as it sounds, is it?"),
-            (H, "Not at all. In fact… it's already beginning. Let me tell you a story."),
-            (G, "[whispering] I'm listening."),
-            (H, f"It started with a simple question: what if {t} could solve a problem nobody had thought to tackle before?"),
-            (G, "[awed] And then what happened?"),
-            (H, "Then — [pauses dramatically] — everything changed. Not overnight. But irreversibly."),
-            (G, f"[reflectively] Stories like that remind us why {t} matters beyond the headlines."),
-            (H, "Exactly. It's never just about technology. It's about people. And what we choose to do with the tools we're given."),
-            (G, "[warmly] A perfect note to end on. Thank you for sharing that."),
-        ]
-    else:  # news
-        lines = [
-            (H, f"[crisply] Good morning. Here are today's top stories on {t}."),
-            (G, f"[professionally] {t} continues to dominate headlines — with three major developments overnight."),
-            (H, "First: new research suggests the pace of change is accelerating faster than most experts predicted."),
-            (G, "Second: industry leaders are calling for clearer guidelines — and regulators appear ready to respond."),
-            (H, f"[seriously] And third: a new report highlights both the promise and the risks of {t} — urging caution without slowing innovation."),
-            (G, "Analysts say the next 90 days will be critical in shaping how this evolves."),
-            (H, "We'll be watching closely. Stay with us for live updates throughout the day."),
-            (G, "[warmly] And if you want to go deeper — full reports are linked below."),
-        ]
-
-    return [{"text": text, "voice": voice_id} for voice_id, text in lines]
-
-
-# ── Live script preview ────────────────────────────────────────────────────────
+# ── Script preview ─────────────────────────────────────────────────────────────
 if topic.strip():
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown("### 📝 Script Preview")
-    preview = build_dialogue(topic, fmt, host_voice, guest_voice)
+    preview = build_dialogue(topic, fmt, host_voice, guest_voice, n_turns)
     rows = []
     for line in preview:
         role  = "host" if line["voice"] == host_voice else "guest"
         label = "HOST" if role == "host" else "GUEST"
         rows.append(f'<span class="{role}">[{label}]</span> {line["text"]}<br>')
     st.markdown(f'<div class="script-box">{"".join(rows)}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="info-box">🎙 {len(preview)} lines · {length_label} · '
+        f'language: {lang_label} · stability: {stability}</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-# ── Generate button ────────────────────────────────────────────────────────────
-generate = st.button("▶  Generate Podcast Audio")
+# ── Generate ───────────────────────────────────────────────────────────────────
+col1, col2 = st.columns([3, 1])
+with col1:
+    generate = st.button("▶  Generate Podcast Audio")
+with col2:
+    show_debug = st.checkbox("Debug", value=False)
 
 if generate:
     if not api_key:
@@ -191,85 +287,68 @@ if generate:
         st.error("✏️ Enter a topic first.")
         st.stop()
 
-    dialogue = build_dialogue(topic, fmt, host_voice, guest_voice)
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
+    dialogue = build_dialogue(topic, fmt, host_voice, guest_voice, n_turns)
+    headers  = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload  = {
         "model": "elevenlabs/text-to-dialogue-v3",
         "input": {
-            "stability": stability,
+            "stability":     stability,
             "language_code": language,
-            "dialogue": dialogue,
+            "dialogue":      dialogue,
         },
     }
 
-    with st.spinner("Submitting to KIE…"):
+    # ── Step 1: Create task ────────────────────────────────────────────────────
+    with st.spinner("Submitting task to KIE…"):
         try:
-            r   = requests.post(
-                "https://api.kie.ai/api/v1/jobs/createTask",
-                headers=headers, json=payload, timeout=30,
-            )
+            r   = requests.post(CREATE_URL, headers=headers, json=payload, timeout=30)
             res = r.json()
         except Exception as e:
             st.error(f"Request failed: {e}")
             st.stop()
 
+    if show_debug:
+        with st.expander("createTask response", expanded=True):
+            st.json(res)
+
     if res.get("code") != 200:
-        st.error(f"API error: {res}")
+        st.error(f"API error {res.get('code')}: {res.get('msg') or res}")
         st.stop()
 
     task_id = res["data"]["taskId"]
-    st.info(f"Task submitted → `{task_id}`")
+    st.info(f"Task created → `{task_id}`")
 
-    status_url = f"https://api.kie.ai/api/v1/jobs/getTask?taskId={task_id}"
-    bar = st.progress(0, text="Generating audio…")
+    # ── Step 2: Poll recordInfo ────────────────────────────────────────────────
+    bar         = st.progress(0, text="Waiting for generation to start…")
+    status_text = st.empty()
 
-    debug = st.expander("🔍 API response (debug)", expanded=False)
+    audio_url, raw = poll_task(task_id, headers, bar, status_text)
 
-    for i in range(60):
-        time.sleep(3)
-        try:
-            r2   = requests.get(status_url, headers=headers, timeout=15)
-            data = r2.json()
-        except Exception as e:
-            st.warning(f"Polling error: {e}")
-            continue
+    if show_debug:
+        with st.expander("Last poll response", expanded=False):
+            st.json(raw)
 
-        # Show raw response so the user can see exactly what the API returns
-        with debug:
-            st.json(data)
-
-        # Safely navigate the response — handle both flat and nested shapes
-        inner  = data.get("data") or data  # some endpoints return flat
-        status = inner.get("status") or inner.get("taskStatus") or "unknown"
-
-        bar.progress(min((i + 1) / 60, 0.95),
-                     text=f"Status: {status} ({(i+1)*3}s elapsed)")
-
-        if status in ("success", "completed", "finished"):
-            bar.progress(1.0, text="Done!")
-            # audioUrl may live in output{} or directly in inner
-            output    = inner.get("output") or inner
-            audio_url = output.get("audioUrl") or output.get("audio_url") or output.get("url")
-            if not audio_url:
-                st.error("Generation finished but no audio URL found. See debug panel above.")
-                st.stop()
-            st.success("🎧 Your podcast is ready!")
-            st.audio(audio_url)
-            st.markdown(
-                f"<a href='{audio_url}' target='_blank' "
-                f"style='color:#e8ff3f; font-family:monospace; font-size:0.85rem;'>"
-                f"⬇ Download MP3</a>",
-                unsafe_allow_html=True,
-            )
-            break
-
-        if status in ("failed", "error"):
-            bar.empty()
-            st.error("Generation failed. See debug panel above for details.")
-            break
+    # ── Step 3: Result ─────────────────────────────────────────────────────────
+    if audio_url:
+        st.success("🎧 Your podcast is ready!")
+        st.audio(audio_url)
+        cost = (raw.get("data") or {}).get("costTime")
+        if cost:
+            st.caption(f"Generated in {cost/1000:.1f}s")
+        st.markdown(
+            f"<a href='{audio_url}' target='_blank' "
+            f"style='color:#e8ff3f; font-family:monospace; font-size:0.85rem;'>"
+            f"⬇ Download MP3</a>",
+            unsafe_allow_html=True,
+        )
+    elif raw.get("timeout"):
+        st.warning(
+            f"⏰ Timed out after {MAX_POLLS * POLL_INTERVAL // 60} min. "
+            f"Your task `{task_id}` may still be running — check the KIE dashboard."
+        )
     else:
-        st.warning("Timed out (3 min). Task may still be processing — check the KIE dashboard.")
+        inner  = raw.get("data") or {}
+        errmsg = inner.get("failMsg") or "Unknown error"
+        st.error(f"Generation failed: {errmsg}")
+        if show_debug:
+            st.json(raw)
