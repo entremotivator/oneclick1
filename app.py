@@ -227,6 +227,8 @@ if generate:
     status_url = f"https://api.kie.ai/api/v1/jobs/getTask?taskId={task_id}"
     bar = st.progress(0, text="Generating audio…")
 
+    debug = st.expander("🔍 API response (debug)", expanded=False)
+
     for i in range(60):
         time.sleep(3)
         try:
@@ -236,13 +238,25 @@ if generate:
             st.warning(f"Polling error: {e}")
             continue
 
-        status = data["data"]["status"]
+        # Show raw response so the user can see exactly what the API returns
+        with debug:
+            st.json(data)
+
+        # Safely navigate the response — handle both flat and nested shapes
+        inner  = data.get("data") or data  # some endpoints return flat
+        status = inner.get("status") or inner.get("taskStatus") or "unknown"
+
         bar.progress(min((i + 1) / 60, 0.95),
                      text=f"Status: {status} ({(i+1)*3}s elapsed)")
 
-        if status == "success":
+        if status in ("success", "completed", "finished"):
             bar.progress(1.0, text="Done!")
-            audio_url = data["data"]["output"]["audioUrl"]
+            # audioUrl may live in output{} or directly in inner
+            output    = inner.get("output") or inner
+            audio_url = output.get("audioUrl") or output.get("audio_url") or output.get("url")
+            if not audio_url:
+                st.error("Generation finished but no audio URL found. See debug panel above.")
+                st.stop()
             st.success("🎧 Your podcast is ready!")
             st.audio(audio_url)
             st.markdown(
@@ -253,10 +267,9 @@ if generate:
             )
             break
 
-        if status == "failed":
+        if status in ("failed", "error"):
             bar.empty()
-            st.error("Generation failed.")
-            st.json(data)
+            st.error("Generation failed. See debug panel above for details.")
             break
     else:
         st.warning("Timed out (3 min). Task may still be processing — check the KIE dashboard.")
